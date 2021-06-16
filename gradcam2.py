@@ -111,7 +111,7 @@ class GradCAM(object):
         # print("TARGET LAYER: ", target_layer)
 
         target_layer.register_forward_hook(forward_hook)
-        target_layer.register_backward_hook(backward_hook)
+        target_layer.register_full_backward_hook(backward_hook)
 
         if verbose:
             try:
