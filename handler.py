@@ -67,6 +67,9 @@ class geozoom_handler():
         
         self.threshold_weights = {}
         
+        self.convergence_dims = (224, 224)
+        self.reduction_percent = .70
+        
         
     def update_handler(self, train_dl):
         
@@ -148,6 +151,8 @@ class geozoom_handler():
                 cur_im = self.prep_input(inp).to(self.device) 
                 prev_im_size = self.image_sizes[muni_id]
                 
+                print("Image dimensions: ", prev_im_size)
+                
                 if (prev_im_size[1] == 224) or (prev_im_size[2] == 224):
                     
                     if self.v:
@@ -162,6 +167,8 @@ class geozoom_handler():
                     
                 # Get the size of the image
                 IM_SIZE = (cur_image.shape[2], cur_image.shape[3])
+            
+                
                 
                 self.model.eval()
                 
@@ -185,7 +192,7 @@ class geozoom_handler():
                     plt.savefig(f"epoch{self.epoch}_muni{muni_id}_gradcam.png")
 
                 
-    def clip_input(self, input, test_arr):
+    def clip_input(self, input, attn_heatmap):
         
         """
         Function to clip the input based on the attention heatmap
@@ -193,50 +200,58 @@ class geozoom_handler():
         """
                 
         # Get the indices of the heatmap of the max value of the heatmap
-        result = np.where(test_arr == np.max(test_arr))
+        max_index = np.where(attn_heatmap == np.max(attn_heatmap))
         
         # Calculate the dimensions that correspond to X% of the most recent image size
-        sh = test_arr.shape
-        sh = (int(sh[0] * .70), int(sh[1] * .70))
+        og_dims = attn_heatmap.shape
+        bounds = attn_heatmap.shape
+        bounds = (int(bounds[0] * self.reduction_percent), int(bounds[1] * self.reduction_percent))
         
-        if (sh[0]) <= 224 or (sh[1] <= 224):
-            if self.v:
-                print("Image is already at scale, skipping clip.")
-            return input.detach().cpu()[:, :, 0:224, 0:224], (0, 224, 0, 224)
-
-        left, right = sh[0], sh[1]
-        ni, nj = test_arr.shape 
-
-        min_row, max_row = 50000, 0
-        min_col, max_col = 50000, 0
-
-        # If the number of indices that are the max are exxcessive, just use the first
-        # TO-DO: CONSIER A BETTER WAY OF DOING THIS
-        if (len(result[0]) > 100) or (len(result[1])  > 100):
-            result = (np.array([result[0][0]]), np.array([result[1][0]]))
+        # If the dimensions are less than the convergence dimensions, resize to convergence dims
+        # TO-D0: MAKE A SELF.CONVERGENCE_DIMS PARAMETER
+        if (bounds[0]) <= self.convergence_dims[0] or (bounds[1] <= self.convergence_dims[1]):
+            bounds = (224, 224)
             
-        # For every x,y max index, do stuff (:
-        for i, j in zip(result[0], result[1]):
+            
+        rows, cols = bounds[0], bounds[1]
+        print("Rows: ", rows, "Cols: ", cols)
+        ni, nj = attn_heatmap.shape 
 
-            istart, istop = max(0, i-left), min(left, i+left+1)
-            jstart, jstop = max(0, j-right), min(right, j+right+1)            
-
-            if istart < min_row:
-                min_row = istart
-            if jstart < min_col:
-                min_col = jstart   
-            if istop > max_row:
-                max_row = istop    
-            if jstop > max_col:
-                max_col = jstop  
-                
-        indices = (min_row, max_row, min_col, max_col)
-        if (indices[1]) < 224 or (indices[3] < 224):
-            """ TO-DO: I THINK THIS NEEDS TO BE MORE THOROUGHLY THOUGHT OUT LATER ON """
-            if self.v:
-                print("Image size is now below 224. Resizing back up to 224x224")
-            indices = (min_row, 224, min_col, 224)
+        # If the number of indices that are greater than one, use the most central max index
+        max_index = (max_index[0][int(len(max_index[0]) / 2)], max_index[1][int(len(max_index[1]) / 2)])
+    
+        print("Max indices: ", max_index)
         
+        rows_half = rows / 2
+        cols_half = cols / 2
+        
+        """ ROWS """
+        min_row = max(0, int(max_index[0] - rows_half))
+        
+        if min_row == 0:
+            max_row = rows
+            
+        else:
+            max_row = int(max_index[0] + rows_half)
+            if max_row > og_dims[0]:
+                min_row -= np.abs(max_row - og_dims[0])
+                max_row = og_dims[0]
+            
+            
+        """ COLUMNS """
+        min_col = max(0, int(max_index[1] - cols_half))
+        
+        if min_col == 0:
+            max_col = cols
+            
+        else:
+            max_col = int(max_index[1] + cols_half)
+            if max_col > og_dims[1]:
+                min_col -= np.abs(max_col - og_dims[1])
+                max_col = og_dims[1]
+            
+            
+        indices = (min_row, max_row, min_col, max_col)
         input = input.detach().cpu()[:, :, min_row:max_row, min_col:max_col]
 
         return input, indices
@@ -319,3 +334,30 @@ class geozoom_handler():
         y_pred = self.model(input)  
         
         return y_pred.item()
+    
+    def prep_attn_data(self, image_names, y, split, batch_size):
+        
+        x_train, y_train, x_val, y_val = train_test_split(np.array(image_names), np.array(y), split)
+
+        train = [(k,v) for k,v in zip(x_train, y_train)]
+        val = [(k,v) for k,v in zip(x_val, y_val)]
+
+        train_dl = torch.utils.data.DataLoader(train, batch_size = batch_size, shuffle = True)
+        val_dl = torch.utils.data.DataLoader(val, batch_size = batch_size, shuffle = True)
+
+        return train_dl, val_dl
+    
+    def train_attn_model(self, train_dl, val_dl):
+        
+        while self.threshold_index > 0:
+            
+            for impath, output in train_dl:
+
+                # Prep the input and pass it to the trainer (this could easily be done in one step eventually if ya want)
+                input = self.prep_input(impath)
+                self.train(input, output)
+
+            self.end_epoch(train_dl, val_dl = None)
+            
+            
+#     def train_fc_model(self)
