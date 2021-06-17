@@ -1,34 +1,24 @@
-import numpy as np
-import random
-import torch
-
-import os
-import PIL
-import numpy as np
-import torch
-import torch.nn.functional as F
-import torchvision.models as models
-from torchvision.utils import make_grid, save_image
-
-import json
-
 import os
 os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID" 
 os.environ["CUDA_VISIBLE_DEVICES"] = "2"
 
-# from utils import visualize_cam, Normalize, load_image, plot_gradcam, get_gradcam
-# from gradcam import GradCAM, GradCAMpp
+
+from torchvision.utils import make_grid, save_image
+import torchvision.models as models
+from handler import geozoom_handler
+import torch.nn.functional as F
+import matplotlib.pyplot as plt
+from copy import deepcopy
+import numpy as np
+import random
+import torch
+import json
+import PIL
+
 
 from attn_model2 import *
-
-import matplotlib.pyplot as plt
-
 from helpers import *
-# from utils import *
-
 from utils2 import *
-
-from copy import deepcopy
 
 
 class geozoom_handler():
@@ -88,18 +78,12 @@ class geozoom_handler():
             print("Loss thresholds for training: ", self.loss_thresholds)
             print("Starting from threshold: ", self.threshold_index, " with value: ", self.cur_threshold)
             
-        if self.epoch_train_loss < self.best_loss:    
-            
-#             print("  Updating model weights.")
-            self.best_loss = self.epoch_train_loss
-            self.best_weights = deepcopy(self.model.state_dict())
             
         # If the loss of the most recent epoch falls below the current threshold...
         if self.epoch_train_loss < self.cur_threshold:      
             
-            self.threshold_weights[self.threshold_index] = self.best_weights
-            self.best_weights = self.model.state_dict()
-            self.best_loss = 90000000000000            
+            # Update the weights for the image reduction threshold
+            self.threshold_weights[self.threshold_index] = deepcopy(self.model.state_dict())
                         
             # Set the new threshold
             self.threshold_index -= 1
@@ -357,6 +341,15 @@ class geozoom_handler():
                 self.train(input, output)
 
             self.end_epoch(train_dl, val_dl = None)
+            
+        if self.threshold_index == 0:
+            
+    
+    def train_fc_model(self, train_dl, val_dl):
+        
+        for e in range(self.num_fc_epochs):
+            
+            
             
             
 #     def train_fc_model(self)
