@@ -28,12 +28,23 @@ class geozoom_handler():
     Initialize at the bgeiining of training to handle all of the variables 
     """
     
-    def __init__(self, model, fc_model, device, criterion, optimizer, fc_optimizer, plot = False, v = False):
+    def __init__(self, 
+                 model, 
+                 fc_model, 
+                 device, 
+                 criterion, 
+                 optimizer, 
+                 fc_optimizer, 
+                 convergence_dims = (224, 224),
+                 reduction_percent = .70,
+                 num_fc_epochs = 100,
+                 plot = False, 
+                 v = False):
         
         self.image_sizes = {}
         self.distance_dict = {}
         self.diff_dict = {}
-        self.epoch_train_loss = 0
+
         self.cur_threshold = 0
         self.epoch = 0
         self.loss_thresholds = []
@@ -44,8 +55,11 @@ class geozoom_handler():
         self.model = model
         self.criterion = criterion
         self.optimizer = optimizer
+        
         self.running_train_loss = 0
         self.running_val_loss = 0
+        self.epoch_train_loss = 0
+        self.epoch_val_loss = 0     
         
         self.to_tens = transforms.ToTensor()
         
@@ -54,10 +68,10 @@ class geozoom_handler():
         
         self.threshold_weights = {}
         
-        self.convergence_dims = (224, 224)
-        self.reduction_percent = .70
+        self.convergence_dims = convergence_dims
+        self.reduction_percent = reduction_percent
         
-        self.num_fc_epochs = 100
+        self.num_fc_epochs = num_fc_epochs
         self.fc_model = fc_model
         self.fc_optimizer = fc_optimizer
         self.best_weights = self.fc_model.state_dict()
@@ -285,6 +299,77 @@ class geozoom_handler():
         
         self.running_train_loss += loss.item()
         
+        
+    def val(self, cur_image, output):
+        
+        """
+        Pass a validation image through the trained thresholds
+        """
+        
+        if 'fc' in self.threshold_weights.keys():
+
+            for k in self.threshold_weights.keys():
+
+                    if k != 'fc':
+
+                        model = self.attn_model
+                        model.load_state_dict(self.threshold_weights[k])
+                        model.eval()
+                        IM_SIZE = (cur_image.shape[2], cur_image.shape[3])
+                        gradcam, attn_heatmap = get_gradcam(model, IM_SIZE, cur_image.cuda()) 
+                        cur_image, new_dims = self.clip_input(cur_image, attn_heatmap)
+
+                        if self.plot == True:
+
+                            plot_gradcam(gradcam)
+                            plt.savefig(f"threshold{k}_muni{muni_id}.png")
+                            plt.clf()
+
+
+                    if k == 'fc':
+
+                        model = self.fc_model
+                        model.load_state_dict(self.threshold_weights[k])
+                        model.eval()
+                        
+                        y_pred = model(cur_image.cuda())
+                        loss = self.criterion(y_pred, output.view(-1,1).to(self.device))
+                        self.running_val_loss += loss.item()       
+        
+        else:
+                        
+            model = self.attn_model
+            keys = list(self.threshold_weights.keys())
+            
+            if len(keys) > 1:
+            
+                for k in self.threshold_weights.keys():
+
+                    model.load_state_dict(self.threshold_weights[k])
+                    model.eval()
+                
+                    
+
+                    if k == keys[-1]:
+
+                        y_pred = model(cur_image.cuda())
+                        loss = self.criterion(y_pred, output.view(-1,1).to(self.device))
+                        self.running_val_loss += loss.item() 
+                        
+                    else:
+                        
+                        IM_SIZE = (cur_image.shape[2], cur_image.shape[3])
+                        gradcam, attn_heatmap = get_gradcam(model, IM_SIZE, cur_image.cuda()) 
+                        cur_image, new_dims = self.clip_input(cur_image, attn_heatmap)    
+                        
+            else:
+                
+                self.model.eval()
+                y_pred = self.model(cur_image.cuda())
+                loss = self.criterion(y_pred, output.view(-1,1).to(self.device))
+                self.running_val_loss += loss.item() 
+                
+                
 
     def end_epoch(self, train_dl, val_dl):
         
@@ -293,9 +378,11 @@ class geozoom_handler():
         """
         
         self.epoch_train_loss = self.running_train_loss / len(train_dl)
+        self.epoch_val_loss = self.running_val_loss / len(val_dl)
         
         print("Epoch: ", self.epoch)
         print("  Training Loss: ", self.epoch_train_loss)
+        print("  Validation Loss: ", self.epoch_val_loss)
         
         
         if self.stage == 'attn':
@@ -313,6 +400,7 @@ class geozoom_handler():
                 self.best_weights = deepcopy(self.model.state_dict())
 
         self.running_train_loss = 0
+        self.running_val_loss = 0
         
         self.epoch += 1
         
@@ -348,11 +436,14 @@ class geozoom_handler():
         while self.threshold_index > 0:
             
             for impath, output in train_dl:
-
                 input = self.prep_input(impath)
                 self.train(input, output)
+                
+            for impath, output in val_dl:
+                input = self.prep_input(impath)
+                self.val(input, output)
 
-            self.end_epoch(train_dl, val_dl = None)
+            self.end_epoch(train_dl, val_dl)
             
         if self.threshold_index == 0:
             
@@ -391,7 +482,7 @@ class geozoom_handler():
         
     def predict_training(self, train_dl):
         
-        print("\nPredicting training_data! \n")
+        print("\nPredicting training data! \n")
         
         for i, o in train_dl:
             
