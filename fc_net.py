@@ -15,8 +15,8 @@ from torchvision.utils import make_grid, save_image
 
 class fc_net(torch.nn.Module):
     
-    def __init__(self, in_channels, h, w, batch_size, resnet):
-        super(attnNetBinary, self).__init__()
+    def __init__(self, resnet):
+        super(fc_net, self).__init__()
 
         # Normal resnet stuff
         self.conv1 = torch.nn.Conv2d(3, 64, kernel_size=(7, 7), stride=(2, 2), padding=(3, 3), bias=False)
@@ -27,8 +27,7 @@ class fc_net(torch.nn.Module):
         self.layer2 = resnet.layer2
         self.layer3 = resnet.layer3
         self.layer4 = resnet.layer4
-        self.linear = torch.nn.Linear(in_features=512, out_features = 1, bias = True)
-        self.out_channels = in_channels
+        self.linear = torch.nn.Linear(in_features = 512, out_features = 1, bias = True)
         self.bn2 = torch.nn.BatchNorm2d(512)
         self.adp_pool = torch.nn.AdaptiveAvgPool2d((1,1))
         
@@ -42,8 +41,6 @@ class fc_net(torch.nn.Module):
         out = self.layer2(out)
         out = self.layer3(out)
         out = self.layer4(out)
-        out = self.relu(out)
-        out = self.bn2(out)
         out = self.adp_pool(out)
         out = out.flatten(start_dim=1)
         out = self.linear(out)

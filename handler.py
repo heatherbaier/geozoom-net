@@ -5,7 +5,7 @@ os.environ["CUDA_VISIBLE_DEVICES"] = "2"
 
 from torchvision.utils import make_grid, save_image
 import torchvision.models as models
-from handler import geozoom_handler
+# from handler import geozoom_handler
 import torch.nn.functional as F
 import matplotlib.pyplot as plt
 from copy import deepcopy
@@ -28,7 +28,7 @@ class geozoom_handler():
     Initialize at the bgeiining of training to handle all of the variables 
     """
     
-    def __init__(self, model, device, criterion, optimizer, plot = False, v = False):
+    def __init__(self, model, fc_model, device, criterion, optimizer, fc_optimizer, plot = False, v = False):
         
         self.image_sizes = {}
         self.distance_dict = {}
@@ -40,6 +40,7 @@ class geozoom_handler():
         self.loss = 0
         self.threshold_index = 7
         self.device = device
+        self.attn_model = model
         self.model = model
         self.criterion = criterion
         self.optimizer = optimizer
@@ -51,14 +52,18 @@ class geozoom_handler():
         self.plot = plot
         self.v = v
         
-        self.best_weights = self.model.state_dict()
-        self.best_loss = 90000000000000
-        
-        
         self.threshold_weights = {}
         
         self.convergence_dims = (224, 224)
-        self.reduction_percent = .90
+        self.reduction_percent = .70
+        
+        self.num_fc_epochs = 100
+        self.fc_model = fc_model
+        self.fc_optimizer = fc_optimizer
+        self.best_weights = self.fc_model.state_dict()
+        self.best_loss = 90000000000000
+        
+        self.stage = 'attn'
         
         
     def update_handler(self, train_dl):
@@ -237,8 +242,9 @@ class geozoom_handler():
             for size in self.image_sizes[muni_id]:
                 image = image.detach().cpu()[:, :, size[0]:size[1], size[2]:size[3]]
             
-        if self.epoch == 0:
-            self.image_sizes[muni_id] = [(0, image.shape[2], 0, image.shape[3])]
+        if self.stage == 'attn':
+            if self.epoch == 0:
+                self.image_sizes[muni_id] = [(0, image.shape[2], 0, image.shape[3])]
         
         return image.to(self.device)
         
@@ -280,8 +286,6 @@ class geozoom_handler():
         self.running_train_loss += loss.item()
         
 
-        
-
     def end_epoch(self, train_dl, val_dl):
         
         """
@@ -294,12 +298,21 @@ class geozoom_handler():
         print("  Training Loss: ", self.epoch_train_loss)
         
         
-        self.update_handler(train_dl)
-#         self.epoch_val_loss = self.running_val_loss / len(val_dl)
+        if self.stage == 'attn':
+            
+            self.update_handler(train_dl)
+            
+            
+        if self.stage == 'fc':
+            
+            if self.epoch_train_loss < self.best_loss:
+                
+                print("Updating best weights!")
+                
+                self.best_loss = self.epoch_train_loss
+                self.best_weights = deepcopy(self.model.state_dict())
 
-    
         self.running_train_loss = 0
-#         self.running_val_loss = 0
         
         self.epoch += 1
         
@@ -336,7 +349,6 @@ class geozoom_handler():
             
             for impath, output in train_dl:
 
-                # Prep the input and pass it to the trainer (this could easily be done in one step eventually if ya want)
                 input = self.prep_input(impath)
                 self.train(input, output)
 
@@ -344,13 +356,76 @@ class geozoom_handler():
             
         if self.threshold_index == 0:
             
+            print("\nImage sizes entering FC model: \n")
+            
+            print(self.image_sizes)
+            
+            print("Switching to fully connected model!")
+            
+            self.train_fc_model(train_dl, val_dl)
+            
     
     def train_fc_model(self, train_dl, val_dl):
         
+        self.epoch = 0
+        self.model = self.fc_model
+        self.optimizer = self.fc_optimizer
+        self.stage = 'fc'
+        
         for e in range(self.num_fc_epochs):
+                        
+            for impath, output in train_dl:
+                
+                # Prep the input and pass it to the trainer (this could easily be done in one step eventually if ya want)
+                input = self.prep_input(impath)
+                self.train(input, output)
             
+            self.end_epoch(train_dl, val_dl = None)
             
+        self.threshold_weights['fc'] = self.best_weights
+        
+        
+        self.predict_training(train_dl)
+        
+        
+        
+    def predict_training(self, train_dl):
+        
+        print("\nPredicting training_data! \n")
+        
+        for i, o in train_dl:
             
-            
-#     def train_fc_model(self)
+            print(round(self.run_validation(i), 2), "     ", o.item())
 
+
+            
+
+    def run_validation(self, impath):
+        
+        muni_id = impath[0].split("/")[4]
+        cur_image = self.prep_input(impath)
+
+        for k in self.threshold_weights.keys():
+
+            if k != 'fc':
+
+                model = self.attn_model
+                model.load_state_dict(self.threshold_weights[k])
+                model.eval()
+                IM_SIZE = (cur_image.shape[2], cur_image.shape[3])
+                gradcam, attn_heatmap = get_gradcam(model, IM_SIZE, cur_image.cuda()) 
+                cur_image, new_dims = self.clip_input(cur_image, attn_heatmap)
+
+                if self.plot == True:
+
+                    plot_gradcam(gradcam)
+                    plt.savefig(f"threshold{k}_muni{muni_id}.png")
+                    plt.clf()
+
+
+            if k == 'fc':
+
+                model = self.fc_model
+                model.load_state_dict(self.threshold_weights[k])
+                model.eval()
+                return model(cur_image.cuda()).item()
