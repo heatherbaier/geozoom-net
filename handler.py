@@ -34,7 +34,7 @@ from copy import deepcopy
 class geozoom_handler():
     
     """
-    Class to control the training of the ZoomNet
+    Class to control the training of the geozoom-net
     Initialize at the bgeiining of training to handle all of the variables 
     """
     
@@ -68,7 +68,7 @@ class geozoom_handler():
         self.threshold_weights = {}
         
         self.convergence_dims = (224, 224)
-        self.reduction_percent = .70
+        self.reduction_percent = .90
         
         
     def update_handler(self, train_dl):
@@ -90,7 +90,7 @@ class geozoom_handler():
             
         if self.epoch_train_loss < self.best_loss:    
             
-            print("  Updating model weights.")
+#             print("  Updating model weights.")
             self.best_loss = self.epoch_train_loss
             self.best_weights = deepcopy(self.model.state_dict())
             
@@ -127,85 +127,67 @@ class geozoom_handler():
         Function to update the image sizes in the dictionary based on the gradcam heatmap for each of the images in the training dataset
         """
         
-        # For each of the images in the training dataset
-        # inp = (img_name,)
-        # out = y
+        # Iterate back over the images in the training dataset and clip them if needed
         for inp, out in data:
 
-            # Grab the municipality ID from the image name and load the image (TO-DO: PUT LOAD_INPUTS IN THIS CLASS)
+            # Grab the municipality ID from the image name and load it
             muni_id = inp[0].split("/")[4]
+            
+            # This will do the iterative clipping to the correct size
             cur_image = self.prep_input(inp)
-                        
-            # If it's the first epoch, add the muni_id to the dictionary and the size of the original image in format: (x_min, x_max, y_min, y_max)
-            if self.epoch == 0:
+            most_recent_im_size = (cur_image.shape[2], cur_image.shape[3])
+            
+            # Here, check to see if the image size is already less than or equal to the convergence dimensions,
+            # If it is, skip the clipping and move on to the next input
+            if (most_recent_im_size[0] <= self.convergence_dims[0]) or (most_recent_im_size[1] <= self.convergence_dims[1]):
                 if self.v:
-                    print("In update, epoch is zero so adding image sizes.")
-                self.image_sizes[muni_id] = (0, cur_image.shape[0], 0, cur_image.shape[1])
-                continue
-                                
-
-            # If the municipality is already in the image_sizes dict, that means it has already been see and the image_size might be different
-            # from the original, so grab the most updated image size from the dictionary and clip the image to those dimensions
-            if muni_id in self.image_sizes.keys():
-                                
-                cur_im = self.prep_input(inp).to(self.device) 
-                prev_im_size = self.image_sizes[muni_id]
-                
-                print("Image dimensions: ", prev_im_size)
-                
-                if (prev_im_size[1] == 224) or (prev_im_size[2] == 224):
-                    
-                    if self.v:
-                        print("Image is already at scale, skipping clip.")
-                    
-                    continue                           
-                    
-                    
-            # If it's past the first epoch...
-            if self.epoch != 0:
-#             else:
+                    print("Image is already at scale, skipping clip.")
+                continue                
+            
+            # If it's not the first epoch and the image needs to be clipped...
+            if self.epoch > 0:
                     
                 # Get the size of the image
-                IM_SIZE = (cur_image.shape[2], cur_image.shape[3])
-            
-                
-                
+                image_size = (cur_image.shape[2], cur_image.shape[3])
+                            
                 self.model.eval()
                 
                 # Get the gradcam and the attention heatmap for the current image
-                gradcam, attn_heatmap = get_gradcam(self.model, IM_SIZE, cur_image.cuda())  
+                gradcam, attn_heatmap = get_gradcam(self.model, image_size, cur_image.cuda())  
+                
+                # Then clip the input to the attention-based area
                 cur_image, new_dims = self.clip_input(cur_image, attn_heatmap)
                 
                 if self.v:
                     print("\n")
                     print(muni_id)
-                    print("old image size: ", IM_SIZE)
+                    print("old image size: ", image_size)
                     print("new image size: ", cur_image.shape[2], cur_image.shape[3])
                 
                 cur_image.cpu()
                 
                 # Update the image sizes in the dictionary
-                self.image_sizes[muni_id] = new_dims  
-                
+                self.image_sizes[muni_id].append(new_dims)
+                                
                 if self.plot:
                     plot_gradcam(gradcam)
                     plt.savefig(f"epoch{self.epoch}_muni{muni_id}_gradcam.png")
 
                 
-    def clip_input(self, input, attn_heatmap):
+    def clip_input(self, image, attn_heatmap):
         
         """
         Function to clip the input based on the attention heatmap
-        TO-DO: CLEAN UP THE VARIABLE NAMES HERE - THE LAST TIME YOU TRIED SOMETHING FUNKY HAPPENED (THE IMAGES DIDIN'T ACTUALLY CLIP) SO COME BACK TO IT
+        TO-DO: CLEAN UP THE VARIABLE NAMES HERE - THE LAST TIME YOU TRIED SOMETHING FUNKY HAPPENED (THE IMAGES DIDN'T ACTUALLY CLIP) SO COME BACK TO IT
         """
                 
-        # Get the indices of the heatmap of the max value of the heatmap
+        # Get the indices of the max value in the heatmap
         max_index = np.where(attn_heatmap == np.max(attn_heatmap))
         
-        # Calculate the dimensions that correspond to X% of the most recent image size
-        og_dims = attn_heatmap.shape
-        bounds = attn_heatmap.shape
-        bounds = (int(bounds[0] * self.reduction_percent), int(bounds[1] * self.reduction_percent))
+        # Calculate the dimensions that correspond to self.reduction_percent's of the most recent image size
+        og_dims = (image.shape[2], image.shape[3])
+        bounds = image.shape
+        bounds = (int(bounds[2] * self.reduction_percent), int(bounds[3] * self.reduction_percent))
         
         # If the dimensions are less than the convergence dimensions, resize to convergence dims
         # TO-D0: MAKE A SELF.CONVERGENCE_DIMS PARAMETER
@@ -214,14 +196,11 @@ class geozoom_handler():
             
             
         rows, cols = bounds[0], bounds[1]
-        print("Rows: ", rows, "Cols: ", cols)
         ni, nj = attn_heatmap.shape 
 
         # If the number of indices that are greater than one, use the most central max index
         max_index = (max_index[0][int(len(max_index[0]) / 2)], max_index[1][int(len(max_index[1]) / 2)])
-    
-        print("Max indices: ", max_index)
-        
+            
         rows_half = rows / 2
         cols_half = cols / 2
         
@@ -252,9 +231,9 @@ class geozoom_handler():
             
             
         indices = (min_row, max_row, min_col, max_col)
-        input = input.detach().cpu()[:, :, min_row:max_row, min_col:max_col]
+        image = image.detach().cpu()[:, :, min_row:max_row, min_col:max_col]
 
-        return input, indices
+        return image, indices
         
         
     def prep_input(self, impath):
@@ -271,11 +250,29 @@ class geozoom_handler():
         
         # If the muni_id is in the image_sizes dictionary, clip it to the right size
         if muni_id in self.image_sizes.keys():
-        
-            dims = self.image_sizes[muni_id]
-            image = image.detach().cpu()[:, :, dims[0]:dims[1], dims[2]:dims[3]]
+            for size in self.image_sizes[muni_id]:
+                image = image.detach().cpu()[:, :, size[0]:size[1], size[2]:size[3]]
+            
+        if self.epoch == 0:
+            self.image_sizes[muni_id] = [(0, image.shape[2], 0, image.shape[3])]
         
         return image.to(self.device)
+        
+        
+        
+    def get_original_size(self, impath):
+        
+        """
+        Function to load in an image and clip it to it's most updated size
+        TO-DO: SEE IF YOU CAN DO THE CLIPPING WITHOUT DETACHING FROM THE GPU
+        """
+        
+        muni_id = impath[0].split("/")[4]
+        
+        # Load the image as a tensor
+        image = self.to_tens(Image.open(impath[0]).convert('RGB')).unsqueeze(0)
+        
+        return image.to(self.device)        
         
         
     def calc_distances():
@@ -297,6 +294,8 @@ class geozoom_handler():
         self.optimizer.step()
         
         self.running_train_loss += loss.item()
+        
+
         
 
     def end_epoch(self, train_dl, val_dl):
@@ -361,3 +360,4 @@ class geozoom_handler():
             
             
 #     def train_fc_model(self)
+
