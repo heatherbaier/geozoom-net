@@ -249,10 +249,28 @@ def plot_gradcam(images, im_name = None):
         plt.savefig(im_name)
 
 
-def get_gradcam(model, im_size, image):
+# def get_gradcam(model, im_size, image):
+
+#     cam_dict = dict()
+#     resnet_model_dict = dict(type='resnet', arch = model, layer_name = 'layer4', input_size = (im_size[0], im_size[1]), target_layer = model.attn_layer)
+#     resnet_gradcam = GradCAM(resnet_model_dict, True)
+#     resnet_gradcampp = GradCAMpp(resnet_model_dict, True)
+#     cam_dict['resnet'] = [resnet_gradcam, resnet_gradcampp]
+
+#     images = []
+#     for gradcam, gradcam_pp in cam_dict.values():
+#         # print(gradcam)
+#         mask, _ = gradcam(image, im_size = im_size)
+#         heatmap, result, mask = visualize_cam(mask.cpu(), image.cpu())
+#         images.append(torch.stack([image.squeeze().cpu(), heatmap, result], 0))
+
+#     return images, mask
+
+
+def get_gradcam(model, im_size, image, target_layer):
 
     cam_dict = dict()
-    resnet_model_dict = dict(type='resnet', arch = model, layer_name = 'layer4', input_size = (im_size[0], im_size[1]), target_layer = model.attn_layer)
+    resnet_model_dict = dict(type='resnet', arch = model, layer_name = 'layer4', input_size = (im_size[0], im_size[1]), target_layer = target_layer)
     resnet_gradcam = GradCAM(resnet_model_dict, True)
     resnet_gradcampp = GradCAMpp(resnet_model_dict, True)
     cam_dict['resnet'] = [resnet_gradcam, resnet_gradcampp]
