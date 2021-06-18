@@ -1,10 +1,9 @@
 import os
-os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID" 
-os.environ["CUDA_VISIBLE_DEVICES"] = "2"
+# os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID" 
+os.environ["CUDA_VISIBLE_DEVICES"] = "3"
 
 from torchvision.utils import make_grid, save_image
 import torchvision.models as models
-# from handler import geozoom_handler
 import torch.nn.functional as F
 import matplotlib.pyplot as plt
 from copy import deepcopy
@@ -14,9 +13,9 @@ import torch
 import json
 import PIL
 
-from attn_model2 import *
-from helpers import *
-from utils2 import *
+# from attn_model2 import *
+# from helpers import *
+from utils import *
 
 
 class geozoom_handler():
@@ -66,7 +65,8 @@ class geozoom_handler():
         self.attn_model = model
         self.model = model
         self.criterion = criterion
-        self.optimizer = optimizer
+        self.reset_optimizer = optimizer
+        self.optimizer = self.reset_optimizer
 
         # Variables for the fully connected model
         self.num_fc_epochs = num_fc_epochs
@@ -81,7 +81,7 @@ class geozoom_handler():
     def update_handler(self, train_dl, val_dl):
         
         """
-        General function that ingests the current status of the model and updates what needs to be updated (:
+        General function that ingests the current state of the model and updates what needs to be updated... (:
         """
                 
         # After the first epoch, calculate all of the loss thresholds and set the beginning threshold index
@@ -110,9 +110,11 @@ class geozoom_handler():
             # Update the sizes of the images in the dictionary (this happens each time we pass a threshold)
             self.update_image_sizes(train_dl)
             self.update_image_sizes(val_dl)
+            self.optimizer = self.reset_optimizer
+            
                         
-            print("Reinitializing random weights.")
-            self.model = self.attn_model
+#             print("Reinitializing random weights.")
+#             self.model = self.attn_model
             
         
     def __calc_loss_thresholds(self):
@@ -263,26 +265,6 @@ class geozoom_handler():
                 self.image_sizes[muni_id] = [(0, image.shape[2], 0, image.shape[3])]
         
         return image.to(self.device)
-        
-        
-        
-    def get_original_size(self, impath):
-        
-        """
-        Function to load in an image and clip it to it's most updated size
-        TO-DO: SEE IF YOU CAN DO THE CLIPPING WITHOUT DETACHING FROM THE GPU
-        """
-        
-        muni_id = impath[0].split("/")[4]
-        
-        # Load the image as a tensor
-        image = self.to_tens(Image.open(impath[0]).convert('RGB')).unsqueeze(0)
-        
-        return image.to(self.device)        
-        
-        
-    def calc_distances():
-        pass
     
     
     def train(self, input, output):
@@ -308,56 +290,11 @@ class geozoom_handler():
         Pass a validation image through the trained thresholds
         """
         
-#         self.model.eval()
+        self.model.eval()
         y_pred = self.model(cur_image.cuda())
         loss = self.criterion(y_pred, output.view(-1,1).to(self.device))
-        self.running_val_loss += loss.item()         
-                                
-#         model = self.attn_model
-#         keys = list(self.threshold_weights.keys())
-        
-#         # If there are acutally weights in the threshold dictionary (i.e. if the training data has been clipped at least once)...
-#         if len(keys) > 0:
-            
-#             # For the weights equivalent to each clip...
-#             for k in self.threshold_weights.keys():
-                
-#                 # Load the weights that coorespond to that clip
-#                 model.load_state_dict(self.threshold_weights[k])
-                
-#                 # and set phasers to stun...
-#                 model.eval()
+        self.running_val_loss += loss.item()
 
-#                 # If it is the last key in the dictionary...
-#                 if k == keys[-1]:
-
-#                     # Do all of the things to get the attention map and clip the image
-#                     IM_SIZE = (cur_image.shape[2], cur_image.shape[3])
-#                     gradcam, attn_heatmap = get_gradcam(model, IM_SIZE, cur_image.cuda(), target_layer = self.model.sa) 
-#                     cur_image, new_dims = self.clip_input(cur_image, attn_heatmap)                       
-                    
-#                     # Now that you have the image according to all of the past clips, run it through the current state of the model (mid-threshold weights)
-#                     self.model.eval()
-#                     y_pred = self.model(cur_image.cuda())
-#                     loss = self.criterion(y_pred, output.view(-1,1).to(self.device))
-#                     self.running_val_loss += loss.item() 
-
-#                 # If it's not the last key in the dictionary, clip it to the k weights and send it back through again
-#                 else:
-
-#                     IM_SIZE = (cur_image.shape[2], cur_image.shape[3])
-#                     gradcam, attn_heatmap = get_gradcam(model, IM_SIZE, cur_image.cuda(), target_layer = self.model.sa) 
-#                     cur_image, new_dims = self.clip_input(cur_image, attn_heatmap)    
-
-#         # If there are no threshold weights, just run it through the model as is
-#         else:
-            
-#             self.model.eval()
-#             y_pred = self.model(cur_image.cuda())
-#             loss = self.criterion(y_pred, output.view(-1,1).to(self.device))
-#             self.running_val_loss += loss.item() 
-                
-                
 
     def end_epoch(self, train_dl, val_dl):
         
@@ -372,26 +309,19 @@ class geozoom_handler():
         print("  Training Loss: ", self.epoch_train_loss)
         print("  Validation Loss: ", self.epoch_val_loss)
         
-        
         if self.stage == 'attn':
-            
             self.update_handler(train_dl, val_dl)
             
             
         if self.stage == 'fc':
-            
             if self.epoch_train_loss < self.best_loss:
-                
                 print("Updating best weights!")
-                
                 self.best_loss = self.epoch_train_loss
                 self.best_weights = deepcopy(self.model.state_dict())
 
         self.running_train_loss = 0
         self.running_val_loss = 0
-        
         self.epoch += 1
-        
         print("\n")
         
     def predict(self, input):
@@ -401,10 +331,8 @@ class geozoom_handler():
         """
         
         self.model.load_state_dict(self.best_weights)
-        
         self.model.eval()
         y_pred = self.model(input)  
-        
         return y_pred.item()
     
     
@@ -425,10 +353,6 @@ class geozoom_handler():
 
         return train_dl, val_dl
 
-    
-
-        
-            
     
     def train_attn_model(self, train_dl, val_dl):
         
@@ -451,8 +375,6 @@ class geozoom_handler():
 
             self.end_epoch(train_dl, val_dl)
             
-#             self.update_validation_image_sizes(val_dl)
-
             
         # When the trehshold index hits 0, move on to training the fc model with no attention layer
         if self.threshold_index == 0:
