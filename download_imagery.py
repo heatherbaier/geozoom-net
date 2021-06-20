@@ -2,32 +2,42 @@ import landsat_prep as lp
 import geopandas as gpd
 import os
 
-
-# Set up variables
-gb_path = "./data/MEX2/ipumns_bbox.shp"
-year = "2010"
-month = "1"
-iso = "MEX2"
-ic = "LANDSAT/LT05/C01/T1"
+from joblib import Parallel, delayed
+from functools import partial
+import multiprocessing
 
 
-# Read in the shapefile and grab the unique shapeID's
-shp = gpd.read_file(gb_path)
-ids = shp["shapeID"].unique()[9:]
-a = 1
 
-
-# For each shapeID...
-for i in ids:
+def main(shapeID):
     
-    print(a, i, " out of ", len(ids))
-    
+    print(shapeID)
+
     try:
 
         # Download the imagery of the municipality bounding box
-        lp.download_boundary_imagery(gb_path, i, year, ic, month, iso, v = False)
-        lp.save_boundary_pngs(i, iso, v = False)
-        a += 1
+        lp.download_boundary_imagery(gb_path, shapeID, year, ic, month, iso, v = False)
+        lp.save_boundary_pngs(shapeID, iso, v = False)
         
-    except:
-        pass
+    except Exception as e:
+        print(e)
+    
+
+if __name__ == "__main__":
+    
+    # Set up variables
+    gb_path = "./data/MEX/ipumns_bbox.shp"
+    year = "2010"
+    month = "all"
+    iso = "MEX"
+    ic = "LANDSAT/LT05/C01/T1"
+
+    # Read in the shapefile and grab the unique shapeID's
+    shp = gpd.read_file(gb_path)
+    ids = shp["shapeID"].unique()
+    a = 1
+    
+    print("Number of ID's to download: ", len(ids))
+        
+    num_cores = 32
+    output = Parallel(n_jobs = num_cores)(delayed(main)(shapeID = i) for i in ids)
+    

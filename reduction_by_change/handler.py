@@ -1,6 +1,6 @@
 import os
-# os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID" 
-os.environ["CUDA_VISIBLE_DEVICES"] = "3"
+os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID" 
+os.environ["CUDA_VISIBLE_DEVICES"] = "2"
 
 from torchvision.utils import make_grid, save_image
 import torchvision.models as models
@@ -78,6 +78,12 @@ class geozoom_handler():
         self.stage = 'attn'
         
         
+        self.hm_tracker = {}
+        self.num_pixels_same_dict = {}
+        self.perc_change_dict = {}
+        self.num_epoch_change_threshold = 2
+        
+        
     def update_handler(self, train_dl, val_dl):
         
         """
@@ -88,33 +94,91 @@ class geozoom_handler():
         if self.epoch == 0:
             
             # Calculate 0, 20, 40, 60, & 80 percent loss thresholds
-            self.loss_thresholds = self.__calc_loss_thresholds()
+#             self.loss_thresholds = self.__calc_loss_thresholds()
             self.threshold_index = self.num_thresholds - 1
-            self.cur_threshold = self.loss_thresholds[self.threshold_index]   
+#             self.cur_threshold = self.loss_thresholds[self.threshold_index]   
             
-            print("Loss thresholds for training: ", self.loss_thresholds)
-            print("Starting from threshold: ", self.threshold_index, " with value: ", self.cur_threshold)
+#             print("Loss thresholds for training: ", self.loss_thresholds)
+#             print("Starting from threshold: ", self.threshold_index, " with value: ", self.cur_threshold)
             
             
         # If the loss of the most recent epoch falls below the current threshold...
-        if self.epoch_val_loss < self.cur_threshold:      
+#         if self.epoch_val_loss < self.cur_threshold:     
+            
+        self.clip_check()
+
+        if self.clip_check():
             
             # Update the weights for the image reduction threshold
             self.threshold_weights[self.threshold_index] = deepcopy(self.model.state_dict())
                                     
             # Set the new threshold
             self.threshold_index -= 1
-            self.cur_threshold = self.loss_thresholds[self.threshold_index]
-            print("  Moving to threshold: ", self.threshold_index, "  |  Next loss benchmark: ", self.cur_threshold)
+#             self.cur_threshold = self.loss_thresholds[self.threshold_index]
+            print("  Moving to threshold: ", self.threshold_index)
             
             # Update the sizes of the images in the dictionary (this happens each time we pass a threshold)
             self.update_image_sizes(train_dl)
             self.update_image_sizes(val_dl)
             self.optimizer = self.reset_optimizer
             
+            self.hm_tracker = {}
+            self.num_pixels_same_dict = {}
+            self.perc_change_dict = {}
                         
 #             print("Reinitializing random weights.")
 #             self.model = self.attn_model
+
+
+    def clip_check(self):
+        
+        if len(self.perc_change_dict) >= 1:
+        
+            vals = list(self.perc_change_dict.values())
+
+            if len(vals[0]) > self.num_epoch_change_threshold:
+
+    #             if self.epoch > self.num_epoch_change_threshold:
+
+    #             vals = list(self.perc_change_dict.values())
+                print("VALS BEFORE: ", vals)
+
+                if self.num_epoch_change_threshold >= len(vals[0]):
+                    vals = [i for i in vals]
+
+    #             elif self.num_epoch_change_threshold > len(vals[0]):
+    #                 vals = [i for i in vals]
+
+                else:
+                    vals = [i[(-self.num_epoch_change_threshold - 1):-1] for i in vals]
+
+                print("VALS AFTER: ", vals)
+                vals = np.array([np.max(i) for i in vals])
+
+                num_change_thresh = .6
+                perc_change_thresh = (-100, 100)
+
+                num_above = vals[(vals >= perc_change_thresh[0]) & (vals <= perc_change_thresh[1])].shape[0]
+                perc_above = (num_above / len(vals))
+
+                print("Percentage above threshold: ", perc_above)
+
+                if perc_above > num_change_thresh:
+                    return True
+                else:
+                    return False
+                
+            else:
+            
+                return False
+            
+    
+        else:
+            
+            return False
+            
+                    
+        
             
         
     def __calc_loss_thresholds(self):
@@ -138,7 +202,7 @@ class geozoom_handler():
         for inp, out in data:
 
             # Grab the municipality ID from the image name and load it
-            muni_id = inp[0].split("/")[4]
+            muni_id = inp[0].split("/")[5]
             
             # This will do the iterative clipping to the correct size
             cur_image = self.prep_input(inp)
@@ -241,6 +305,78 @@ class geozoom_handler():
         image = image.detach().cpu()[:, :, min_row:max_row, min_col:max_col]
 
         return image, indices
+    
+    
+    
+    def stats(self, impath, cur_image):
+        
+        muni_id = impath[0].split("/")[5]
+        
+        # Get the size of the image
+        image_size = (cur_image.shape[2], cur_image.shape[3])
+
+        # Get the gradcam and the attention heatmap for the current image
+        gradcam, attn_heatmap = get_gradcam(self.model, image_size, cur_image.cuda(), target_layer = self.model.sa)  
+        
+        breaks = [i * (255 / 4) for i in range(0, 5)]
+        attn_heatmap[(attn_heatmap >= breaks[0]) & (attn_heatmap < breaks[3])] = 1
+        attn_heatmap[(attn_heatmap >= breaks[3]) & (attn_heatmap < breaks[4])] = 255
+        
+        
+        if self.plot:
+            plt.imshow(attn_heatmap)
+            plt.savefig(f"{muni_id}_epoch{self.epoch}.png")
+            plt.clf()
+        
+        
+        # If there is no previous heatmap already saved for a given municipality, save the heatmap and move on 
+        # i.e. if self.epoch == 0...
+        if muni_id not in self.hm_tracker:
+            self.hm_tracker[muni_id] = [attn_heatmap]
+            return 
+        
+        # If a previous heatmap does exist...
+        else:
+            
+            # Grab the most recent heatmap
+            hm_t1 = self.hm_tracker[muni_id][-1]
+            hm_t2 = attn_heatmap
+            
+            # Calculate the number of pixels that are the same in the highest attention 
+            # class between the two images
+            num_pixels_same_class1 = hm_t1[(hm_t1 == 255) & (hm_t2 == 255)].shape
+            
+            # If the image is not already in the num_pixels_same_dict, save it and return
+            if muni_id not in self.num_pixels_same_dict:
+                self.num_pixels_same_dict[muni_id] = [num_pixels_same_class1[0]]
+                return
+            
+            # If it does exist in the dictionary...
+            else:
+                
+                # Append the number of same pixels
+                self.num_pixels_same_dict[muni_id].append(num_pixels_same_class1[0])
+                
+                # If the number of pixels saved is more than 1...
+                if len(self.num_pixels_same_dict[muni_id]) > 1:
+                    
+                    # Calculate the percentage change
+                    nps_t1 = self.num_pixels_same_dict[muni_id][-2]
+                    nps_t2 = self.num_pixels_same_dict[muni_id][-1]
+                    
+                    # Potential divsion by zero error
+                    try:
+                        perc_change = ((nps_t2 - nps_t1) / nps_t2) * 100
+                    except:
+                        perc_change = 0
+                    
+                    if muni_id not in self.perc_change_dict:
+                        self.perc_change_dict[muni_id] = [perc_change]
+                    
+                    else:
+                        self.perc_change_dict[muni_id].append(perc_change)
+                    
+        
         
         
     def prep_input(self, impath):
@@ -250,10 +386,14 @@ class geozoom_handler():
         TO-DO: SEE IF YOU CAN DO THE CLIPPING WITHOUT DETACHING FROM THE GPU
         """
         
-        muni_id = impath[0].split("/")[4]
+        muni_id = impath[0].split("/")[5]
         
         # Load the image as a tensor
         image = self.to_tens(Image.open(impath[0]).convert('RGB')).unsqueeze(0)
+        
+        
+#         if muni_id == '484002003':
+#             self.temp(image)        
         
         # If the muni_id is in the image_sizes dictionary, clip it to the right size
         if muni_id in self.image_sizes.keys():
@@ -274,7 +414,7 @@ class geozoom_handler():
         """
         
         self.model.train()
-        y_pred = self.model(input)    
+        y_pred = self.model(input)            
         loss = self.criterion(y_pred, output.view(-1,1).to(self.device))
         
         self.optimizer.zero_grad()
@@ -314,9 +454,9 @@ class geozoom_handler():
             
             
         if self.stage == 'fc':
-            if self.epoch_train_loss < self.best_loss:
+            if self.epoch_val_loss < self.best_loss:
                 print("Updating best weights!")
-                self.best_loss = self.epoch_train_loss
+                self.best_loss = self.epoch_val_loss
                 self.best_weights = deepcopy(self.model.state_dict())
 
         self.running_train_loss = 0
@@ -365,9 +505,14 @@ class geozoom_handler():
         # to get the standard iamge sizes for the fc model
         while self.threshold_index > 0:
             
-            for impath, output in train_dl:
+            for impath, output in train_dl:                
                 input = self.prep_input(impath)
+                self.stats(impath, input)
                 self.train(input, output)
+                
+# #             self.hm_tracker = {}
+#             print("num_pixels_same_dict: ", self.num_pixels_same_dict)
+#             print("perc_change_dict: ", self.perc_change_dict)
                 
             for impath, output in val_dl:
                 input = self.prep_input(impath)
@@ -404,8 +549,15 @@ class geozoom_handler():
                 # Prep the input and pass it to the trainer
                 input = self.prep_input(impath)
                 self.train(input, output)
+                
+                
+            for impath, output in val_dl:
+                
+                # Prep the input and pass it to the validator
+                input = self.prep_input(impath)
+                self.val(input, output)                
             
-            self.end_epoch(train_dl, val_dl = None)
+            self.end_epoch(train_dl, val_dl)
             
         self.threshold_weights['fc'] = self.best_weights
         
@@ -435,7 +587,7 @@ class geozoom_handler():
         Can be called forminside or outside of the handler
         """
         
-        muni_id = impath[0].split("/")[4]
+        muni_id = impath[0].split("/")[5]
         cur_image = self.prep_input(impath)
 
         for k in self.threshold_weights.keys():
