@@ -40,7 +40,8 @@ class geozoom_handler():
                  num_thresholds = 7,                 # Number of times (-1) to clip an image
                  convergence_dims = (224, 224),      # Smallest dimenions an image can be clipped to
                  reduction_percent = .70,            # Percentage of the image to keep each time it is clipped
-                 perc_change_thresh = (-100, 100),
+                 change_bounds = (-100, 100),
+                 perc_change_thresh = .60,
                  estimator = 'rf',
                  plot = False, 
                  v = False):
@@ -81,6 +82,7 @@ class geozoom_handler():
         self.perc_change_dict = {}
         self.num_epoch_change_threshold = 2
         self.perc_change_thresh = perc_change_thresh
+        self.change_bounds = change_bounds
 
         
         self.scale_estimates = {}
@@ -172,14 +174,19 @@ class geozoom_handler():
                 
                 vals = np.array([np.max(i) for i in vals])
 
+                
+                
                 num_change_thresh = .6
+                
+                
+                
 
-                num_above = vals[(vals >= self.perc_change_thresh[0]) & (vals <= self.perc_change_thresh[1])].shape[0]
+                num_above = vals[(vals >= self.change_bounds[0]) & (vals <= self.change_bounds[1])].shape[0]
                 perc_above = (num_above / len(vals))
 
                 print("Percentage above threshold: ", perc_above)
 
-                if perc_above > num_change_thresh:
+                if perc_above > self.perc_change_thresh:
                     return True
                 else:
                     return False
