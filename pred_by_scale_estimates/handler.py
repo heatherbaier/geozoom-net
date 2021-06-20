@@ -1,6 +1,6 @@
 import os
 os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID" 
-os.environ["CUDA_VISIBLE_DEVICES"] = "1"
+os.environ["CUDA_VISIBLE_DEVICES"] = "3"
 
 from torchvision.utils import make_grid, save_image
 import torchvision.models as models
@@ -17,25 +17,31 @@ import PIL
 # from helpers import *
 from utils import *
 
+# Estimators
+from sklearn.ensemble import RandomForestRegressor
+from sklearn.tree import DecisionTreeRegressor
+from sklearn.neural_network import MLPRegressor
+from sklearn.neighbors import KNeighborsRegressor
+
+
 
 class geozoom_handler():
     
     """
     Class to control the training of the geozoom-net
-    Initialize at the bgeiining of training to handle all of the variables 
+    Initialize at the beginning of training to handle all of the variables 
     """
     
     def __init__(self, 
                  model, 
-                 fc_model, 
                  device, 
                  criterion, 
                  optimizer, 
-                 fc_optimizer, 
                  num_thresholds = 7,                 # Number of times (-1) to clip an image
                  convergence_dims = (224, 224),      # Smallest dimenions an image can be clipped to
                  reduction_percent = .70,            # Percentage of the image to keep each time it is clipped
-                 num_fc_epochs = 100,
+                 perc_change_thresh = (-100, 100),
+                 estimator = 'rf',
                  plot = False, 
                  v = False):
         
@@ -68,20 +74,17 @@ class geozoom_handler():
         self.reset_optimizer = optimizer
         self.optimizer = self.reset_optimizer
 
-        # Variables for the fully connected model
-        self.num_fc_epochs = num_fc_epochs
-        self.fc_model = fc_model
-        self.fc_optimizer = fc_optimizer
-        self.best_weights = self.fc_model.state_dict()
-        self.best_loss = 90000000000000
-        
         self.stage = 'attn'
-        
         
         self.hm_tracker = {}
         self.num_pixels_same_dict = {}
         self.perc_change_dict = {}
         self.num_epoch_change_threshold = 2
+        self.perc_change_thresh = perc_change_thresh
+
+        
+        self.scale_estimates = {}
+        self.estimator = estimator
         
         
     def update_handler(self, train_dl, val_dl):
@@ -97,7 +100,6 @@ class geozoom_handler():
             self.threshold_index = self.num_thresholds - 1
             
         # If the stats of the epoch pass the clip check:
-        self.clip_check()
         if self.clip_check():
             
             # Update the weights for the image reduction threshold
@@ -116,12 +118,45 @@ class geozoom_handler():
             self.hm_tracker = {}
             self.num_pixels_same_dict = {}
             self.perc_change_dict = {}
+            
+            self.save_scale_estimates(train_dl, val_dl)
                         
 #             print("Reinitializing random weights.")
 #             self.model = self.attn_model
 
 
+    def save_scale_estimates(self, train_dl, val_dl):
+        
+        self.model.eval()
+        
+        for impath, output in train_dl:   
+            muni_id = impath[0].split("/")[3]
+            input = self.prep_input(impath)
+            self.stats(impath, input)
+            y_pred = self.model(input).item()
+            
+            if muni_id not in self.scale_estimates.keys():
+                self.scale_estimates[muni_id] = [y_pred]
+            else:
+                self.scale_estimates[muni_id].append(y_pred)
+
+        for impath, output in val_dl:
+            muni_id = impath[0].split("/")[3]
+            input = self.prep_input(impath)
+            self.val(input, output)
+            y_pred = self.model(input).item()
+            
+            if muni_id not in self.scale_estimates.keys():
+                self.scale_estimates[muni_id] = [y_pred]
+            else:
+                self.scale_estimates[muni_id].append(y_pred)
+                
+
     def clip_check(self):
+        
+        """
+        Function to check if the attention maps pass the input parameters and the images are ready to clip
+        """
         
         if len(self.perc_change_dict) >= 1:
         
@@ -138,9 +173,8 @@ class geozoom_handler():
                 vals = np.array([np.max(i) for i in vals])
 
                 num_change_thresh = .6
-                perc_change_thresh = (-100, 100)
 
-                num_above = vals[(vals >= perc_change_thresh[0]) & (vals <= perc_change_thresh[1])].shape[0]
+                num_above = vals[(vals >= self.perc_change_thresh[0]) & (vals <= self.perc_change_thresh[1])].shape[0]
                 perc_above = (num_above / len(vals))
 
                 print("Percentage above threshold: ", perc_above)
@@ -358,9 +392,7 @@ class geozoom_handler():
                     else:
                         self.perc_change_dict[muni_id].append(perc_change)
                     
-        
-        
-        
+                
     def prep_input(self, impath):
         
         """
@@ -372,10 +404,6 @@ class geozoom_handler():
         
         # Load the image as a tensor
         image = self.to_tens(Image.open(impath[0]).convert('RGB')).unsqueeze(0)
-        
-        
-#         if muni_id == '484002003':
-#             self.temp(image)        
         
         # If the muni_id is in the image_sizes dictionary, clip it to the right size
         if muni_id in self.image_sizes.keys():
@@ -502,71 +530,78 @@ class geozoom_handler():
         # When the trehshold index hits 0, move on to training the fc model with no attention layer
         if self.threshold_index == 0:
             
-            print("\nImage sizes entering FC model: \n")
-            print(self.image_sizes)
+#             print("\nImage sizes entering FC model: \n")
+#             print(self.image_sizes)
             print("Switching to fully connected model!")
             self.train_fc_model(train_dl, val_dl)
             
     
-    def train_fc_model(self, train_dl, val_dl):
+    def train_fc_model(self, train_dl, val_dl, outside_estimator = None):
         
         """
-        Function to traint he fully connected model on the standard image sizes after the self-attention based spatial filtering model has finishing filtering down each of the images
+        Function to train the fully connected model on the standard image sizes after the self-attention based spatial filtering model has finishing filtering down each of the images
         """
         
-        # Reset all of the variables, and initialize the new model
-        self.epoch = 0
-        self.model = self.fc_model
-        self.optimizer = self.fc_optimizer
-        self.stage = 'fc'
+        # Orgnanize data for tabular model
+        y_dict = {}
         
-        for e in range(self.num_fc_epochs):
-                        
-            for impath, output in train_dl:
-                
-                # Prep the input and pass it to the trainer
-                input = self.prep_input(impath)
-                self.train(input, output)
-                
-                
-            for impath, output in val_dl:
-                
-                # Prep the input and pass it to the validator
-                input = self.prep_input(impath)
-                self.val(input, output)                
-            
-            self.end_epoch(train_dl, val_dl)
-            
-        self.threshold_weights['fc'] = self.best_weights
-        
-        self.predict_training(train_dl)
-        
-        
-        
-    def predict_training(self, train_dl):
-        
-        """
-        Function to predict the trianing data after the whole model is done training
-        (This can be taken out later on, or just replaced with the equivalent but 
-        for the validation data)
-        """
-        
-        print("\nPredicting training data! \n")
-        
-        for i, o in train_dl:
-            
-            print(round(self.run_validation(i), 2), "     ", o.item())
+        for impath, output in train_dl:
+            muni_id = impath[0].split("/")[3]
+            y_dict[muni_id] = output.numpy()[0]
+        for impath, output in val_dl:
+            muni_id = impath[0].split("/")[3]
+            y_dict[muni_id] = output.numpy()[0]
 
+        muni_ids = list(y_dict.keys())
+        
+        
+        x = [self.scale_estimates[mid] for mid in muni_ids]
+        y = [y_dict[mid] for mid in muni_ids]
+        
+        if  outside_estimator == None:
+            estimator = self.estimator
+        else:
+            estimator = outside_estimator
+            
+            
+        if estimator == 'rf':
+        
+            rfr = RandomForestRegressor()
+            rfr.fit(x, y)
+            print("Random Forest MAE: ", mae(y, rfr.predict(x)))
+            
+        elif estimator == 'dt':
+        
+            dtr = DecisionTreeRegressor(max_depth = 5)
+            dtr.fit(x, y)
+            print("Decision Tree MAE: ", mae(y, dtr.predict(x)))    
+            
+        elif estimator == 'mlp':
+        
+            mlp = MLPRegressor()
+            mlp.fit(x, y)
+            print("MLP MAE: ", mae(y, mlp.predict(x)))  
+            
+        elif estimator == 'knn':
+        
+            knn = KNeighborsRegressor()
+            knn.fit(x, y)
+            print("KNN MAE: ", mae(y, knn.predict(x)))              
+            
 
-    def run_validation(self, impath):
+    def plot_attn_map(self, impath):
         
         """
-        Function to pass a single image through models/trhesholds that have been trained thus far
-        Can be called forminside or outside of the handler
+        Function to save the attention maps for a given image at each threshold
         """
         
-        muni_id = impath[0].split("/")[3]
-        cur_image = self.prep_input(impath)
+        muni_id = impath.split("/")[3]
+        cur_image = self.prep_input([impath])
+        folder = f"{muni_id}_attention_maps"
+        
+        if not os.path.isdir(folder):
+            os.mkdir(folder)
+            
 
         for k in self.threshold_weights.keys():
 
@@ -579,16 +614,9 @@ class geozoom_handler():
                 gradcam, attn_heatmap = get_gradcam(model, IM_SIZE, cur_image.cuda(), target_layer = self.model.sa) 
                 cur_image, new_dims = self.clip_input(cur_image, attn_heatmap)
 
-                if self.plot == True:
+                fname = os.path.join(f"{muni_id}_attention_maps", f"threshold{k}_muni{muni_id}.png") 
+                
+                plot_gradcam(gradcam)
+                plt.savefig(fname)
+                plt.clf()
 
-                    plot_gradcam(gradcam)
-                    plt.savefig(f"threshold{k}_muni{muni_id}.png")
-                    plt.clf()
-
-
-            if k == 'fc':
-
-                model = self.fc_model
-                model.load_state_dict(self.threshold_weights[k])
-                model.eval()
-                return model(cur_image.cuda()).item()

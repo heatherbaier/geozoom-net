@@ -196,3 +196,7 @@ def train_test_split(image_names, y, split):
 
     return x_train, y_train, x_val, y_val
 
+
+def mae(true, pred):
+    diff = np.abs(true - pred)
+    return np.mean(diff)
