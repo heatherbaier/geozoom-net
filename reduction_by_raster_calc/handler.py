@@ -13,15 +13,7 @@ import torch
 import json
 import PIL
 
-# from attn_model2 import *
-# from helpers import *
 from utils import *
-
-# Estimators
-from sklearn.ensemble import RandomForestRegressor
-from sklearn.tree import DecisionTreeRegressor
-from sklearn.neural_network import MLPRegressor
-from sklearn.neighbors import KNeighborsRegressor
 
 
 
@@ -43,7 +35,6 @@ class geozoom_handler():
                  fc_batch_size = 2,
                  reduction_percent = .70,            # Percentage of the image to keep each time it is clipped
                  max_to_change = 10,                 # Number of times a pixel should be in the highest attention class before clipping
-                 estimator = 'rf',
                  plot = False, 
                  v = False):
         
@@ -54,10 +45,9 @@ class geozoom_handler():
         self.v = v      
         self.reduction_percent = reduction_percent    
         
-        self.threshold_index = 0                     #
-        self.threshold_weights = {}
-        self.cur_threshold = 0
-        self.image_sizes = {}
+        self.threshold_index = 0                     # Number of times the full imagery set has been clipped
+        self.threshold_weights = {}                  # Keys = threshold_index (i.e. clip #); Values = Weights of model at point of clip
+        self.image_sizes = {}                        # Keys = Municipality ID's; Values = List of iamgery dimensions from each clip
         
         self.epoch = 0
         self.loss = 0
@@ -66,31 +56,27 @@ class geozoom_handler():
         self.epoch_train_loss = 0
         self.epoch_val_loss = 0             
         
-        # Variables for the self-attention based spatial filtering model
+        # Variables for the attention based spatial filtering model
+        self.stage = 'attn'
         self.attn_model = model
         self.model = model
         self.criterion = criterion
         self.reset_optimizer = optimizer
         self.optimizer = self.reset_optimizer
         
-        
+        # Variables for the fully converged model
         self.fc_model = fc_model
         self.fc_optimizer = fc_optimizer
         self.best_loss = 9000000000
         self.num_fc_epochs = num_fc_epochs
         self.fc_batch_size = fc_batch_size
 
-        
+        self.hm_tracker = {}                         # Dictionary to keep track of the attention heatmaps for each municipality
+        self.max_to_change = max_to_change           # Number of times a pixel should be in the highest attention class
+        self.perc_over_thresh = 0                    # Percentage of images that to cross the max_to_change threshold to run the full imagery clip
 
-        self.stage = 'attn'
-        
-        self.hm_tracker = {}
-        self.max_to_change = max_to_change
-        self.perc_over_thresh = 0
-
-        self.scale_estimates = {}
-        self.estimator = estimator
-        self.go_dict = {}
+        self.scale_estimates = {}                    # Stores the y predictions for each image right before the imagery is clipped
+        self.go_dict = {}                            # Dictionary of 0's & 1's; 1 = Image is at convergence dims, 0 = Image is not at convergence dims
         
         
         
@@ -119,7 +105,15 @@ class geozoom_handler():
         
         
         
+        
     def set_converence_dims(self, train_dl, val_dl):
+        
+        """
+        Function to find smallest height and width in the full dataset (both training and validation)
+        The smallest h & w can come from different images
+        All images will converge down to this dimension
+        TO_DO: Find a less time-consuming way to do this if possible
+        """
         
         smallest_dims = (900000, 900000)
         
@@ -145,10 +139,7 @@ class geozoom_handler():
             
         self.convergence_dims = smallest_dims
         
-        
-        
-        
-        
+
         
         
     def update_handler(self, train_dl, val_dl):
@@ -156,29 +147,33 @@ class geozoom_handler():
         """
         General function that ingests the current state of the model and updates what needs to be updated... (:
         """
-                
-#         # After the first epoch, calculate all of the loss thresholds and set the beginning threshold index
-#         if self.epoch == 0:
-#             self.threshold_index = self.num_thresholds += 1
-            
+
         # If the stats of the epoch pass the clip check:
         if self.clip_check():
             
             # Update the weights for the image reduction threshold
             self.threshold_weights[self.threshold_index] = deepcopy(self.model.state_dict())
                                     
-            # Set the new threshold
+            # Update the number of times the image has been clipped
             self.threshold_index += 1
             
             # Update the sizes of the images in the dictionary (this happens each time we pass a threshold)
+            # and reset the attention heatmap tracker
             self.update_image_sizes(train_dl)
             self.update_image_sizes(val_dl)            
             self.hm_tracker = {}
             
+            # Save the y estimates of the data at the current image scale
             self.save_scale_estimates(train_dl, val_dl)
 
+            
+            
 
     def save_scale_estimates(self, train_dl, val_dl):
+        
+        """
+        Function to save the y estimates of the data at the current image scale
+        """
         
         self.model.eval()
         
@@ -204,6 +199,8 @@ class geozoom_handler():
             else:
                 self.scale_estimates[muni_id].append(y_pred)
                 
+                
+                
 
     def clip_check(self):
         
@@ -214,11 +211,13 @@ class geozoom_handler():
         count = 0
         total = len(self.hm_tracker.keys())
         
+        # For every attention heatmap, if it's max value is above self.max_to_change, add 1 to the count
         for hm in self.hm_tracker.values():
-#             print(np.max(hm))
             if np.max(hm) >= self.max_to_change:
                 count += 1
-                        
+        
+        # If there's at least one image with a max value above self.max_to_change, check the percentage
+        # of images that have a pixel that fall above this threshold
         if count != 0:
             self.perc_over_thresh = count / total
             if (count / total) >= .50:
@@ -230,6 +229,8 @@ class geozoom_handler():
             return False
         
                 
+            
+            
     def update_image_sizes(self, data):
         
         """
@@ -283,6 +284,8 @@ class geozoom_handler():
                     plot_gradcam(gradcam)
                     plt.savefig(f"epoch{self.epoch}_muni{muni_id}_gradcam.png")
 
+                
+                
                 
     def clip_input(self, image, attn_heatmap):
         
@@ -346,17 +349,19 @@ class geozoom_handler():
     
     
     
+    
     def stats(self, impath, cur_image):
         
-        muni_id = impath[0].split("/")[3]
+        """
+        Function to reclassify the attention heatmap into 2 class (highest attention and not highest attention)
+        """
         
-        # Get the size of the image
+        # Get the mun_id, the image size and the gradcam and attention heatmap for the current image
+        muni_id = impath[0].split("/")[3]
         image_size = (cur_image.shape[2], cur_image.shape[3])
-
-        # Get the gradcam and the attention heatmap for the current image
         gradcam, attn_heatmap = get_gradcam(self.model, image_size, cur_image.cuda(), target_layer = self.model.sa)  
         
-        # Reclassify everything so the pixels not in the highest attention class = 0 an dthose in it are 1
+        # Reclassify everything so the pixels not in the highest attention class = 0 and those in it = 1
         breaks = [i * (255 / 4) for i in range(0, 5)]
         attn_heatmap[(attn_heatmap >= breaks[0]) & (attn_heatmap < breaks[3])] = 0
         attn_heatmap[(attn_heatmap >= breaks[3]) & (attn_heatmap <= breaks[4])] = 1
@@ -367,22 +372,18 @@ class geozoom_handler():
             plt.savefig(f"{muni_id}_epoch{self.epoch}.png")
             plt.clf()
         
-        
-        # If there is no previous heatmap already saved for a given municipality, save the heatmap and move on 
-        # i.e. if self.epoch == 0...
+        # If there is no previous heatmap already saved for a given municipality, save the heatmap and move on i.e. if self.epoch == 0...
         if muni_id not in self.hm_tracker:
             self.hm_tracker[muni_id] = attn_heatmap
             return 
         
-        # If a previous heatmap does exist...
+        # If a previous heatmap does exist add the current heatmap to the old one
         else:
-            
-            # Add the current heatmap to the old one
             self.hm_tracker[muni_id] += attn_heatmap
             
 
-                    
-                
+            
+            
     def prep_input(self, impath):
         
         """
@@ -390,9 +391,8 @@ class geozoom_handler():
         TO-DO: SEE IF YOU CAN DO THE CLIPPING WITHOUT DETACHING FROM THE GPU
         """
         
+        # Grab the municipality ID and load the image as a tensor
         muni_id = impath[0].split("/")[3]
-        
-        # Load the image as a tensor
         image = self.to_tens(Image.open(impath[0]).convert('RGB')).unsqueeze(0)
         
         # If the muni_id is in the image_sizes dictionary, clip it to the right size
@@ -400,11 +400,14 @@ class geozoom_handler():
             for size in self.image_sizes[muni_id]:
                 image = image.detach().cpu()[:, :, size[0]:size[1], size[2]:size[3]]
             
+        # If it's the first attention-based epoch, save the original image size to the self.image_sizes dictionary
         if self.stage == 'attn':
             if self.epoch == 0:
                 self.image_sizes[muni_id] = [(0, image.shape[2], 0, image.shape[3])]
         
         return image.to(self.device)
+    
+    
     
     
     def train(self, input, output):
@@ -424,6 +427,8 @@ class geozoom_handler():
         self.running_train_loss += loss.item()
         
         
+        
+        
     def val(self, cur_image, output):
         
         """
@@ -436,6 +441,8 @@ class geozoom_handler():
         self.running_val_loss += loss.item()
 
 
+        
+        
     def end_epoch(self, train_dl, val_dl):
         
         """
@@ -461,18 +468,7 @@ class geozoom_handler():
         self.epoch += 1
 
         
-    def predict(self, input):
         
-        """
-        Function to predict a single datapoint
-        """
-        
-        self.model.load_state_dict(self.best_weights)
-        self.model.eval()
-        y_pred = self.model(input)  
-        return y_pred.item()
-    
-
     
     def train_attn_model(self, train_dl, val_dl):
         
@@ -483,10 +479,7 @@ class geozoom_handler():
         
         print('{:20}{:20}{:20}{:20}{:20}{:20}'.format("Epoch", "Training Loss", "Validation Loss", "# times clipped", "# images at scale", "% above max"))
         
-        # While the threshold index is above 0, train the self-attention based spatial filtering mode
-        # to get the standard iamge sizes for the fc model
-#         while self.threshold_index > 0:
-        
+        # Until all images reach the convergence dimension, train the attension based model
         while sum(self.go_dict.values()) < (len(train_dl) + len(val_dl)):
                         
             for impath, output in train_dl:                
@@ -500,15 +493,16 @@ class geozoom_handler():
 
             self.end_epoch(train_dl, val_dl)
             
-
         print("Switching to fully connected model!")
         self.train_fc_model(train_dl, val_dl)
             
     
+    
+    
     def train_fc_model(self, train_dl, val_dl, outside_estimator = None):
         
         """
-        Function to train the fully connected model on the standard image sizes after the self-attention based spatial filtering model has finishing filtering down each of the images
+        Function to train the fully converged model on the standard image sizes after the attention based spatial filtering model has finishing filtering down each of the images
         """
                 
         train = [(k,v) for k,v in zip(self.x_train, self.y_train)]
@@ -524,7 +518,6 @@ class geozoom_handler():
         self.optimizer = self.fc_optimizer
         self.stage = 'fc'     
         
-        
         for e in range(self.num_fc_epochs):
                         
             for impath, output in train_dl:
@@ -535,7 +528,6 @@ class geozoom_handler():
                 input = self.prep_input(impath)
                 self.val(input, output)                
                 
-            
             self.end_epoch(train_dl, val_dl)
             
         self.threshold_weights['fc'] = self.best_weights
@@ -571,4 +563,8 @@ class geozoom_handler():
                 plot_gradcam(gradcam)
                 plt.savefig(fname)
                 plt.clf()
-
+                
+                
+                
+                
+                
